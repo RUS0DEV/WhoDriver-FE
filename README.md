@@ -20,7 +20,8 @@ npm install
 npm run dev
 ```
 
-По умолчанию приложение использует API по адресу `http://localhost:3000/api/v1`.
+По умолчанию приложение использует production API на Render. Для локального бэкенда укажите
+`http://localhost:3000/api/v1` в `VITE_API_BASE_URL`.
 Измените `VITE_API_BASE_URL` в `.env`, если бэкенд доступен по другому адресу.
 
 ## Интеграция с API

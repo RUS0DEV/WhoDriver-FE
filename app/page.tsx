@@ -17,6 +17,7 @@ type Vehicle = {
 };
 
 const PAGE_SIZE = 6;
+const DEFAULT_API_BASE_URL = "https://whodriver-be.onrender.com/api/v1";
 const PLATE_LETTERS: Record<string, string> = {
   A: "А",
   B: "В",
@@ -32,40 +33,6 @@ const PLATE_LETTERS: Record<string, string> = {
   Y: "У",
 };
 const PLATE_PATTERN = /^[АВЕКМНОРСТУХ]\d{3}[АВЕКМНОРСТУХ]{2}\d{2,3}$/;
-
-const DEMO_VEHICLES: Vehicle[] = [
-  { plate: "А472МР77", rating: 4.8, ratingCount: 42, commentCount: 18, createdAt: "сегодня" },
-  { plate: "Е913КХ799", rating: 4.6, ratingCount: 27, commentCount: 11, createdAt: "сегодня" },
-  { plate: "М207ОТ50", rating: 4.4, ratingCount: 19, commentCount: 7, createdAt: "вчера" },
-  { plate: "С856АН197", rating: 4.2, ratingCount: 31, commentCount: 14, createdAt: "вчера" },
-  { plate: "У381РС77", rating: 4.0, ratingCount: 16, commentCount: 6, createdAt: "2 дня назад" },
-  { plate: "К104ТУ178", rating: 3.8, ratingCount: 24, commentCount: 9, createdAt: "2 дня назад" },
-  { plate: "В729ЕО190", rating: 3.7, ratingCount: 13, commentCount: 4, createdAt: "3 дня назад" },
-  { plate: "Н568МС77", rating: 3.5, ratingCount: 38, commentCount: 22, createdAt: "3 дня назад" },
-  { plate: "Р042ХВ750", rating: 3.4, ratingCount: 9, commentCount: 3, createdAt: "4 дня назад" },
-  { plate: "Т719АР77", rating: 3.2, ratingCount: 21, commentCount: 8, createdAt: "5 дней назад" },
-  { plate: "О205КЕ50", rating: 3.1, ratingCount: 11, commentCount: 5, createdAt: "6 дней назад" },
-  { plate: "А001АА777", rating: 2.9, ratingCount: 46, commentCount: 26, createdAt: "неделю назад" },
-];
-
-const DEMO_COMMENTS: Comment[] = [
-  {
-    id: "comment-1",
-    content: "Аккуратно перестроился и пропустил на выезде со двора. Спасибо!",
-    createdAt: "сегодня, 12:40",
-  },
-  {
-    id: "comment-2",
-    content: "Держит дистанцию, без резких манёвров. В плотном потоке — очень спокойно.",
-    createdAt: "сегодня, 09:15",
-  },
-  {
-    id: "comment-own",
-    content: "Уступил дорогу у пешеходного перехода.",
-    createdAt: "вчера, 18:20",
-    own: true,
-  },
-];
 
 function normalizePlate(value: string) {
   return value
@@ -137,8 +104,23 @@ function getList(payload: unknown) {
   return [];
 }
 
+function getVehicle(payload: unknown) {
+  const record = (payload ?? {}) as Record<string, unknown>;
+  const nestedVehicle = record.vehicle ?? record.item;
+  const dataVehicle = !Array.isArray(record.data) && typeof record.data === "object" ? record.data : undefined;
+  const vehicle = toVehicle(nestedVehicle ?? dataVehicle ?? record);
+  const comments = Array.isArray(record.comments) ? record.comments.map(toComment) : vehicle.comments;
+  return { ...vehicle, comments: comments ?? [] };
+}
+
+class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
+
 function getApiBase() {
-  return (import.meta.env.VITE_API_BASE_URL || "/api/v1").replace(/\/$/, "");
+  return (import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE_URL).replace(/\/$/, "");
 }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -149,7 +131,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const detail = await response.json().catch(() => null) as { message?: string } | null;
-    throw new Error(detail?.message || "Не удалось выполнить запрос");
+    throw new ApiError(detail?.message || "Не удалось выполнить запрос", response.status);
   }
   return response.json() as Promise<T>;
 }
@@ -160,7 +142,7 @@ function Stars({ value }: { value: number }) {
 
 export default function Home() {
   const [screen, setScreen] = useState<"home" | "vehicle">("home");
-  const [vehicles, setVehicles] = useState<Vehicle[]>(DEMO_VEHICLES);
+  const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [selected, setSelected] = useState<Vehicle | null>(null);
   const [query, setQuery] = useState("");
   const [searchResults, setSearchResults] = useState<Vehicle[] | null>(null);
@@ -171,7 +153,7 @@ export default function Home() {
   const [commentText, setCommentText] = useState("");
   const [editing, setEditing] = useState<string | null>(null);
   const [toast, setToast] = useState("");
-  const [isDemo, setIsDemo] = useState(true);
+  const [feedState, setFeedState] = useState<"loading" | "ready" | "error">("loading");
 
   const notify = (message: string) => {
     setToast(message);
@@ -183,12 +165,14 @@ export default function Home() {
     api<unknown>(`/vehicles?page=1&limit=50&sort=recent`)
       .then((payload) => {
         const next = getList(payload).map(toVehicle).filter((vehicle) => vehicle.plate);
-        if (!cancelled && next.length) {
+        if (!cancelled) {
           setVehicles(next);
-          setIsDemo(false);
+          setFeedState("ready");
         }
       })
-      .catch(() => undefined);
+      .catch(() => {
+        if (!cancelled) setFeedState("error");
+      });
     return () => { cancelled = true; };
   }, []);
 
@@ -202,12 +186,19 @@ export default function Home() {
   const pageCount = Math.max(1, Math.ceil(sortedVehicles.length / PAGE_SIZE));
   const feed = sortedVehicles.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
-  const openVehicle = (vehicle: Vehicle) => {
-    setSelected({ ...vehicle, comments: vehicle.comments ?? DEMO_COMMENTS });
+  const openVehicle = async (vehicle: Vehicle) => {
+    const initial = { ...vehicle, comments: vehicle.comments ?? [] };
+    setSelected(initial);
     setScreen("vehicle");
     setSearchResults(null);
     setPendingCreate(null);
     window.scrollTo({ top: 0, behavior: "smooth" });
+    try {
+      const detail = getVehicle(await api<unknown>(`/vehicles/${encodeURIComponent(vehicle.plate)}`));
+      if (detail.plate) setSelected(detail);
+    } catch {
+      notify("Не удалось загрузить карточку полностью");
+    }
   };
 
   const submitSearch = async (event: FormEvent) => {
@@ -223,19 +214,18 @@ export default function Home() {
     try {
       if (PLATE_PATTERN.test(normalized)) {
         try {
-          const result = toVehicle(await api<unknown>(`/vehicles/${encodeURIComponent(normalized)}`));
+          const result = getVehicle(await api<unknown>(`/vehicles/${encodeURIComponent(normalized)}`));
           if (result.plate) {
             openVehicle(result);
             return;
           }
-        } catch {
-          const local = vehicles.find((vehicle) => vehicle.plate === normalized);
-          if (local) {
-            openVehicle(local);
+        } catch (error) {
+          if (error instanceof ApiError && error.status === 404) {
+            setPendingCreate(normalized);
+            setSearchResults([]);
             return;
           }
-          setPendingCreate(normalized);
-          setSearchResults([]);
+          notify("Не удалось выполнить поиск. Попробуйте позже.");
           return;
         }
       }
@@ -244,9 +234,9 @@ export default function Home() {
           .map(toVehicle)
           .filter((vehicle) => vehicle.plate);
         setSearchResults(results);
-        setIsDemo(false);
       } catch {
-        setSearchResults(vehicles.filter((vehicle) => vehicle.plate.includes(normalized)));
+        setSearchResults(null);
+        notify("Не удалось выполнить поиск. Попробуйте позже.");
       }
     } finally {
       setLoading(false);
@@ -257,7 +247,7 @@ export default function Home() {
     setLoading(true);
     try {
       try {
-        const result = toVehicle(await api<unknown>("/vehicles", {
+        const result = getVehicle(await api<unknown>("/vehicles", {
           method: "POST",
           body: JSON.stringify({ plate }),
         }));
@@ -265,10 +255,7 @@ export default function Home() {
         setVehicles((current) => [next, ...current]);
         openVehicle(next);
       } catch {
-        const next = { plate, rating: 0, ratingCount: 0, commentCount: 0, createdAt: "только что", comments: [] };
-        setVehicles((current) => [next, ...current]);
-        openVehicle(next);
-        notify("Карточка создана в демо-режиме");
+        notify("Не удалось создать карточку. Попробуйте позже.");
       }
     } finally {
       setLoading(false);
@@ -277,6 +264,7 @@ export default function Home() {
 
   const rateVehicle = async (value: number) => {
     if (!selected) return;
+    const previous = selected;
     const nextCount = selected.ratingCount + 1;
     const next = {
       ...selected,
@@ -292,13 +280,16 @@ export default function Home() {
       });
       notify("Оценка сохранена");
     } catch {
-      notify("Оценка сохранена локально — подключите API для публикации");
+      setSelected(previous);
+      setVehicles((current) => current.map((vehicle) => vehicle.plate === previous.plate ? previous : vehicle));
+      notify("Не удалось сохранить оценку. Попробуйте позже.");
     }
   };
 
   const addComment = async (event: FormEvent) => {
     event.preventDefault();
     if (!selected || !commentText.trim()) return;
+    const previous = selected;
     const content = commentText.trim();
     const local: Comment = { id: `local-${Date.now()}`, content, createdAt: "только что", own: true };
     const next = { ...selected, comments: [local, ...(selected.comments ?? [])], commentCount: selected.commentCount + 1 };
@@ -312,12 +303,16 @@ export default function Home() {
       });
       notify("Комментарий опубликован");
     } catch {
-      notify("Комментарий сохранён локально — подключите API для публикации");
+      setSelected(previous);
+      setVehicles((current) => current.map((vehicle) => vehicle.plate === previous.plate ? previous : vehicle));
+      setCommentText(content);
+      notify("Не удалось опубликовать комментарий. Попробуйте позже.");
     }
   };
 
   const saveComment = async (id: string, content: string) => {
     if (!selected || !content.trim()) return;
+    const previous = selected;
     const comments = (selected.comments ?? []).map((comment) => comment.id === id ? { ...comment, content: content.trim() } : comment);
     setSelected({ ...selected, comments });
     setEditing(null);
@@ -325,12 +320,14 @@ export default function Home() {
       await api(`/comments/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ content: content.trim() }) });
       notify("Комментарий изменён");
     } catch {
-      notify("Изменение сохранено локально");
+      setSelected(previous);
+      notify("Не удалось изменить комментарий. Попробуйте позже.");
     }
   };
 
   const deleteComment = async (id: string) => {
     if (!selected) return;
+    const previous = selected;
     const comments = (selected.comments ?? []).filter((comment) => comment.id !== id);
     const next = { ...selected, comments, commentCount: Math.max(0, selected.commentCount - 1) };
     setSelected(next);
@@ -339,17 +336,19 @@ export default function Home() {
       await api(`/comments/${encodeURIComponent(id)}`, { method: "DELETE" });
       notify("Комментарий удалён");
     } catch {
-      notify("Комментарий скрыт локально");
+      setSelected(previous);
+      setVehicles((current) => current.map((vehicle) => vehicle.plate === previous.plate ? previous : vehicle));
+      notify("Не удалось удалить комментарий. Попробуйте позже.");
     }
   };
 
   const reportComment = async (id: string) => {
     try {
       await api(`/comments/${encodeURIComponent(id)}/report`, { method: "POST", body: JSON.stringify({ reason: "Требует проверки модератором" }) });
+      notify("Жалоба отправлена на проверку");
     } catch {
-      // The interface remains usable without a local API server.
+      notify("Не удалось отправить жалобу. Попробуйте позже.");
     }
-    notify("Жалоба отправлена на проверку");
   };
 
   const changeSort = (next: Sort) => {
@@ -408,6 +407,7 @@ export default function Home() {
           </form>
 
           <div className="comment-list">
+            {(selected.comments ?? []).length === 0 && <div className="empty-state"><b>Отзывов пока нет</b><p>Будьте первым, кто поделится опытом.</p></div>}
             {(selected.comments ?? []).map((comment) => (
               <article className="comment" key={comment.id}>
                 <div className="comment-meta"><span className="comment-avatar">А</span><span>Анонимный водитель</span><time>{comment.createdAt}</time></div>
@@ -468,16 +468,16 @@ export default function Home() {
       </section>}
 
       <section className="feed-section" aria-labelledby="feed-title">
-        <div className="section-heading feed-heading"><div><span className="eyebrow">лента</span><h2 id="feed-title">Водители рядом</h2></div><span className="feed-count">{isDemo ? "новые карточки" : "обновлено сейчас"}</span></div>
+        <div className="section-heading feed-heading"><div><span className="eyebrow">лента</span><h2 id="feed-title">Водители рядом</h2></div><span className="feed-count">{feedState === "loading" ? "загружаем…" : feedState === "error" ? "API недоступен" : "обновлено сейчас"}</span></div>
         <div className="sort-row" aria-label="Сортировка ленты">
           {([ ["recent", "Свежие"], ["rating", "По рейтингу"], ["comments", "По отзывам"] ] as [Sort, string][]).map(([value, label]) => <button className={sort === value ? "active" : ""} key={value} type="button" onClick={() => changeSort(value)}>{label}</button>)}
         </div>
-        <div className="vehicle-grid">{feed.map((vehicle) => <VehicleCard key={vehicle.plate} vehicle={vehicle} onOpen={openVehicle} />)}</div>
-        <nav className="pagination" aria-label="Страницы ленты">
+        {feed.length > 0 ? <div className="vehicle-grid">{feed.map((vehicle) => <VehicleCard key={vehicle.plate} vehicle={vehicle} onOpen={openVehicle} />)}</div> : <div className="empty-state"><b>{feedState === "error" ? "Не удалось загрузить ленту" : "Карточек пока нет"}</b><p>{feedState === "error" ? "Проверьте подключение и попробуйте обновить страницу." : "Первая карточка появится после добавления номера."}</p></div>}
+        {pageCount > 1 && <nav className="pagination" aria-label="Страницы ленты">
           <button type="button" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={page === 1}>←</button>
           {Array.from({ length: pageCount }, (_, index) => index + 1).map((number) => <button className={page === number ? "active" : ""} aria-current={page === number ? "page" : undefined} key={number} type="button" onClick={() => setPage(number)}>{number}</button>)}
           <button type="button" onClick={() => setPage((current) => Math.min(pageCount, current + 1))} disabled={page === pageCount}>→</button>
-        </nav>
+        </nav>}
       </section>
 
       <section className="bottom-callout"><span>⌁</span><div><b>Дорога становится безопаснее, когда мы внимательнее друг к другу.</b><p>Оцените поступок, а не человека.</p></div></section>
