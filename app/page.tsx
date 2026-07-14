@@ -1,5 +1,3 @@
-"use client";
-
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
 type Sort = "recent" | "rating" | "comments";
@@ -140,7 +138,7 @@ function getList(payload: unknown) {
 }
 
 function getApiBase() {
-  return (process.env.NEXT_PUBLIC_API_BASE_URL || "/api/v1").replace(/\/$/, "");
+  return (import.meta.env.VITE_API_BASE_URL || "/api/v1").replace(/\/$/, "");
 }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
